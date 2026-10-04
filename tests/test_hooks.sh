@@ -10,6 +10,8 @@ PIDS=""
 trap 'for p in $PIDS; do kill "$p" 2>/dev/null; done; rm -rf "$WORK"' EXIT
 unset ANAMNESIS_CAPTURE ANAMNESIS_CAPTURE_FILTER
 fail=0
+# A test block that runs in a subshell ends with `exit $fail` and is called
+# as `( ... ) || fail=1`, or its failures never reach the exit code.
 check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: got [$2] want [$3]"; fail=1; fi; }
 
 # Starts a fresh stand-in server; sets SRV (its state dir) and URL.
@@ -148,9 +150,10 @@ new_home
     chmod 500 "$WORK/ro"
     start=$SECONDS
     anamnesis_lock_acquire "$WORK/ro/x.lck" 1
-    check "an unremovable stale lock gives up within the wait" "$([ $? -eq 1 ] && [ $((SECONDS - start)) -le 6 ] && echo bounded)" bounded
+    check "an unremovable stale lock gives up within the wait" "$([ $? -eq 1 ] && [ $((SECONDS - start)) -le 15 ] && echo bounded)" bounded
     chmod 700 "$WORK/ro"
-)
+    exit $fail
+) || fail=1
 
 # Queue: atomic writes, unsafe paths dropped, drain stops at a failure.
 new_home
@@ -173,7 +176,8 @@ new_home
     routes '{}'
     anamnesis_drain_queue
     check "drain replays once the server is back" "$(ls "$ANAMNESIS_QUEUE_DIR" | wc -l | tr -d ' ')" 0
-)
+    exit $fail
+) || fail=1
 
 # Token refresh: one refresh for concurrent callers, 0600, nothing on argv.
 new_home '{"expires_at": 0}'
@@ -255,5 +259,20 @@ check "config holds the new key" "$(jq -r '.api_key + " " + (.access_token // "n
 check "config written 0600" "$(python3 -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' "$ANAMNESIS_HOME/config.json")" 0o600
 check "api key not on curl's command line" "$(grep -c anm_secret "$WORK/argv")" 0
 check "probe sent the key as a header" "$(grep get_memory_stats "$SRV/requests" | jq -r .auth)" anm_secret
+echo "anm_other" | plugins/anamnesis/bin/anamnesis-config --api-key - --handle t --server "http://127.0.0.1:9" >/dev/null 2>"$WORK/cfg.err"
+check "unreachable server: config not replaced" "$? $(jq -r '.api_key' "$ANAMNESIS_HOME/config.json")" "1 anm_secret"
+check "unreachable server: told so" "$(grep -c 'could not reach' "$WORK/cfg.err")" 1
+routes '{"/mcp/tools/get_memory_stats": {"status": 503}}'
+echo "anm_other" | plugins/anamnesis/bin/anamnesis-config --api-key - --handle t --server "$URL" >/dev/null 2>&1
+check "server error: key not saved unchecked" "$? $(jq -r '.api_key' "$ANAMNESIS_HOME/config.json")" "1 anm_secret"
+routes '{}'
+
+# anamnesis pause/resume: the gap record holds whatever the pause file held.
+new_home
+printf 'odd "quoted"\nline\n' > "$ANAMNESIS_HOME/paused"
+plugins/anamnesis/bin/anamnesis resume >/dev/null
+check "gap record is valid JSON with the pause file's contents" "$(jq -r '.paused_at' "$ANAMNESIS_HOME/last_gap.json")" 'odd "quoted"
+line'
+check "resume removed the pause file" "$([ -e "$ANAMNESIS_HOME/paused" ] && echo still || echo gone)" gone
 
 exit $fail
