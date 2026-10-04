@@ -1,62 +1,37 @@
 #!/usr/bin/env bash
-# anamnesis/hooks/session-end.sh
-# Fires when a Claude Code session closes. Triggers server-side pipeline
-# advance (episodes → echoes) for this session's captured content.
+# Claude Code SessionEnd: ask the server to advance this session's pipeline
+# (episodes to echoes) now rather than in the nightly batch.
 
 set -u
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=common.sh
+# shellcheck source-path=SCRIPTDIR source=common.sh
 . "$HOOK_DIR/common.sh"
 
-# Capture opt-out for headless harness calls (2026-09-18): a desk or eval harness that drives
-# `claude -p` sets ANAMNESIS_CAPTURE=off so its calls are never captured as the owner's memories.
-# (289 harness-generated echoes landed in the owner's pool on 2026-09-16/17 before this existed.)
-if [ "${ANAMNESIS_CAPTURE:-on}" = "off" ]; then
-    exit 0
-fi
-
-anamnesis_check_pause
 anamnesis_load_config || exit 0
 
-SID="$(anamnesis_read_session_id)"
-if [ -z "$SID" ]; then
-    # Nothing to close. Still OK — idempotent.
-    exit 0
-fi
-
-STDIN_JSON="$(cat 2>/dev/null || true)"
+STDIN_JSON="$(cat)"
+anamnesis_resolve_sid "$STDIN_JSON"
+[ -n "$ANAMNESIS_SID" ] || exit 0
 REASON="$(printf '%s' "$STDIN_JSON" | jq -r '.reason // "exit"' 2>/dev/null)"
-[ -z "$REASON" ] && REASON="exit"
+[ -n "$REASON" ] || REASON="exit"
 
-# Stop's capture worker runs in the background (0.3.2). Give the final
-# turn's upload a moment to land before session_close triggers reflection —
-# otherwise that content waits for the nightly batch. Wait ≤15s for a live
-# worker, then proceed regardless (reflection is idempotent, batch is the
-# backstop).
+# Give a running Stop worker up to 15s to land the last turn, so reflection
+# sees it; the nightly batch is the backstop if it does not.
 TRANSCRIPT_PATH="$(printf '%s' "$STDIN_JSON" | jq -r '.transcript_path // empty' 2>/dev/null)"
 if [ -n "$TRANSCRIPT_PATH" ]; then
-    KEY="$(anamnesis_transcript_key "$TRANSCRIPT_PATH")"
-    if anamnesis_lock_acquire "$KEY" 30; then
-        anamnesis_lock_release "$KEY"
-    fi
+    LOCK="$ANAMNESIS_STATE_DIR/$(anamnesis_transcript_key "$TRANSCRIPT_PATH").lck"
+    anamnesis_lock_acquire "$LOCK" 30 && anamnesis_lock_release "$LOCK"
 fi
 
-BODY="$(jq -n --arg sid "$SID" --arg reason "$REASON" \
-    '{session_id: $sid, reason: $reason}')"
-
+BODY="$(jq -n --arg sid "$ANAMNESIS_SID" --arg reason "$REASON" '{session_id: $sid, reason: $reason}')"
 if ! anamnesis_post "/mcp/tools/session_close" "$BODY" >/dev/null; then
     anamnesis_queue_payload "/mcp/tools/session_close" "$BODY"
-    anamnesis_log_error "session_close_queued" "sid=$SID reason=$REASON"
+    anamnesis_log_error "session_close_queued" "sid=$ANAMNESIS_SID reason=$REASON"
 fi
 
-# Receipt housekeeping (ADR-070): this session's rate-limit markers are
-# spent, and any unconsumed pending capture receipt must not leak into the
-# next session. Prune sweeps markers from sessions that never ended cleanly.
-rm -f "$ANAMNESIS_RECEIPT_DIR/$(anamnesis_transcript_key "$SID")".* \
-      "$ANAMNESIS_RECEIPT_DIR/pending_capture.json" 2>/dev/null || true
+# This session's receipt markers and any unshown capture receipt are spent.
+SID_KEY="$(anamnesis_transcript_key "$ANAMNESIS_SID")"
+rm -f "$ANAMNESIS_RECEIPT_DIR/$SID_KEY".* "$ANAMNESIS_RECEIPT_DIR/pending_capture.$SID_KEY.json"
 anamnesis_receipt_prune
-
-# Clear the session marker regardless — a new SessionStart will regenerate.
-anamnesis_clear_session_id
-
+anamnesis_clear_session_id "$ANAMNESIS_SID"
 exit 0

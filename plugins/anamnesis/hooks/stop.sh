@@ -1,187 +1,92 @@
 #!/usr/bin/env bash
-# anamnesis/hooks/stop.sh
-# Fires after every assistant turn. Captures the turn via log_session and
-# forwards per-turn usage telemetry.
-#
-# Performance contract (0.3.2): this hook returns to Claude Code
-# immediately — all network work runs in a detached background worker.
-# Capture is incremental: a per-transcript high-water mark under
-# $ANAMNESIS_STATE_DIR records how many JSONL lines have been shipped, and
-# each Stop sends only the lines added since. A per-transcript lock
-# serializes overlapping workers so a delta is never double-sent.
-#
-# Why not resend the whole transcript and lean on server dedup, as 0.3.1
-# did? Two reasons: (a) the server ids episodes by ingest-time + chunk
-# hash, so resends were *duplicating* episodes, not deduping; (b) the
-# usage loop re-POSTed every historical turn on every Stop — O(n²) POSTs
-# over a session's life, minutes of wall-clock by turn ~1000.
+# Claude Code Stop: after every assistant turn, upload the conversation
+# added since the last upload (log_session) plus per-turn usage telemetry.
+# All network work runs in a detached worker, so the hook returns at once.
+# A per-transcript high-water mark records how many JSONL lines were sent;
+# resending whole transcripts duplicated episodes on the server.
 
 set -u
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=common.sh
+# shellcheck source-path=SCRIPTDIR source=common.sh
 . "$HOOK_DIR/common.sh"
 
-# Capture opt-out for headless harness calls (2026-09-18): a desk or eval harness that drives
-# `claude -p` sets ANAMNESIS_CAPTURE=off so its calls are never captured as the owner's memories.
-# (289 harness-generated echoes landed in the owner's pool on 2026-09-16/17 before this existed.)
-if [ "${ANAMNESIS_CAPTURE:-on}" = "off" ]; then
-    exit 0
-fi
-
-anamnesis_check_pause
 anamnesis_load_config || exit 0
 
-SID="$(anamnesis_read_session_id)"
-if [ -z "$SID" ]; then
-    # SessionStart didn't fire (or state was lost). Synthesize a
-    # recovery id so server gets a session_id to dedup against.
-    SID="recovered-$(date -u +"%Y%m%dT%H%M%SZ")"
-    anamnesis_write_session_id "$SID"
-fi
-
-# Consume stdin in the foreground — Claude Code closes the pipe when the
-# hook exits, so the background worker can't read it later.
+# Read stdin now: Claude Code closes the pipe when the hook exits.
 STDIN_JSON="$(cat)"
+anamnesis_resolve_sid "$STDIN_JSON"
+if [ -z "$ANAMNESIS_SID" ]; then
+    ANAMNESIS_SID="recovered-$(date -u +"%Y%m%dT%H%M%SZ")"
+    anamnesis_write_session_id "$ANAMNESIS_SID"
+fi
 TRANSCRIPT_PATH="$(printf '%s' "$STDIN_JSON" | jq -r '.transcript_path // empty' 2>/dev/null)"
+PENDING_RECEIPT="$ANAMNESIS_RECEIPT_DIR/pending_capture.$(anamnesis_transcript_key "$ANAMNESIS_SID").json"
 
-# Capture receipt (ADR-070): capture runs detached, so its receipt is
-# deferred — the worker deposits an outcome file after a confirmed upload and
-# the NEXT Stop (here, foreground, no network, no waiting) turns it into a
-# zero-token systemMessage. Once per session; the pending file is consumed
-# either way so it never goes stale across sessions.
-PENDING_RECEIPT="$ANAMNESIS_RECEIPT_DIR/pending_capture.json"
-if [ -f "$PENDING_RECEIPT" ]; then
-    R_SID="$(jq -r '.session_id // empty' < "$PENDING_RECEIPT" 2>/dev/null)"
-    R_TURNS="$(jq -r '.turns // 0' < "$PENDING_RECEIPT" 2>/dev/null)"
-    rm -f "$PENDING_RECEIPT" 2>/dev/null || true
-    case "$R_TURNS" in *[!0-9]*|"") R_TURNS=0 ;; esac
-    if [ "$R_SID" = "$SID" ] && [ "$R_TURNS" -gt 0 ] \
-        && [ "$(anamnesis_receipts_level)" = "normal" ] \
+# Foreground, no network: a rejected sign-in seen by an earlier worker, or
+# the capture receipt (ADR-070) a worker deposited after a confirmed upload.
+if anamnesis_auth_warning_due; then
+    jq -n --arg msg "$ANAMNESIS_AUTH_WARNING" '{systemMessage: $msg}'
+elif [ -f "$PENDING_RECEIPT" ]; then
+    TURNS="$(jq -r '.turns // 0' < "$PENDING_RECEIPT" 2>/dev/null)"
+    rm -f "$PENDING_RECEIPT"
+    case "$TURNS" in ''|*[!0-9]*) TURNS=0 ;; esac
+    if [ "$TURNS" -gt 0 ] && [ "$(anamnesis_receipts_level)" = "normal" ] \
         && anamnesis_receipt_once "capture"; then
         NOUN="turns"
-        [ "$R_TURNS" -eq 1 ] && NOUN="turn"
-        jq -n --arg msg "[anamnesis] session capture is live — $R_TURNS $NOUN backed up so far. /clear is free whenever you want it." \
+        [ "$TURNS" -eq 1 ] && NOUN="turn"
+        jq -n --arg msg "[anamnesis] session capture is live — $TURNS $NOUN backed up so far. /clear is free whenever you want it." \
             '{systemMessage: $msg}'
     fi
 fi
 
 anamnesis_stop_worker() {
-    local transcript body
-
-    if [ -n "$TRANSCRIPT_PATH" ] && [ -r "$TRANSCRIPT_PATH" ]; then
-        local key state_file sent total delta_jsonl
-        key="$(anamnesis_transcript_key "$TRANSCRIPT_PATH")"
-        # If a live worker holds the lock past the wait, bail: the state
-        # file only advances on send, so the next Stop picks the delta up.
-        anamnesis_lock_acquire "$key" || return 0
-        state_file="$ANAMNESIS_STATE_DIR/$key.json"
-
-        sent="$(jq -r '.lines_sent // 0' < "$state_file" 2>/dev/null)"
-        case "$sent" in *[!0-9]*|"") sent=0 ;; esac
-        total="$(wc -l < "$TRANSCRIPT_PATH" | tr -d '[:space:]')"
-        case "$total" in *[!0-9]*|"") total=0 ;; esac
-        if [ "$total" -lt "$sent" ]; then
-            # Transcript shrank — rotated or rewritten. Start over; the
-            # content is new from our point of view.
-            sent=0
-        fi
-        if [ "$total" -le "$sent" ]; then
-            anamnesis_lock_release "$key"
-            return 0
-        fi
-        delta_jsonl="$(tail -n +"$((sent + 1))" "$TRANSCRIPT_PATH" | head -n "$((total - sent))")"
-
-        # Extract PROSE from each transcript row. Assistant messages carry
-        # .message.content as an ARRAY of content blocks
-        # ([{"type":"text","text":…},{"type":"tool_use",…}]); the old code did
-        # `| tostring` on that array, which stored the raw JSON envelope
-        # ([{"type":"text","text":"…"}]) as the memory — the "gibberish" on the
-        # dashboard. Now we pull the text blocks' .text and drop thinking /
-        # tool_use / tool_result. String content (user turns) passes through.
-        local filter_mode
-        filter_mode="$(anamnesis_capture_filter_mode)"
-        transcript="$(printf '%s' "$delta_jsonl" \
-            | jq -r --arg filter "$filter_mode" "$ANAMNESIS_JQ_CONVERSATION"'
-                select(is_conversation) | conv_text | select(length > 0)
-              ' 2>/dev/null)"
-
-        if [ -n "$transcript" ]; then
-            body="$(printf '%s' "$transcript" | jq -Rs --arg sid "$SID" \
-                '{session_id: $sid, transcript: .}')"
-            if anamnesis_post "/mcp/tools/log_session" "$body" >/dev/null; then
-                # Receipt deposit (ADR-070): upload confirmed — leave the
-                # outcome for the next foreground Stop to surface. Skipped
-                # once the session's capture receipt has fired (the marker
-                # outlives the pending file). turns = prose-bearing rows in
-                # this delta, a real local measurement.
-                if ! anamnesis_receipt_fired "capture"; then
-                    local turns
-                    turns="$(printf '%s' "$delta_jsonl" | jq -s --arg filter "$filter_mode" "$ANAMNESIS_JQ_CONVERSATION"'
-                        [ .[] | select(is_conversation) | conv_text | select(length > 0) ] | length' 2>/dev/null)"
-                    case "$turns" in *[!0-9]*|"") turns=0 ;; esac
-                    if [ "$turns" -gt 0 ]; then
-                        mkdir -p "$ANAMNESIS_RECEIPT_DIR" 2>/dev/null || true
-                        jq -n --arg sid "$SID" --argjson t "$turns" \
-                            '{session_id: $sid, turns: $t}' \
-                            > "$ANAMNESIS_RECEIPT_DIR/pending_capture.json" 2>/dev/null || true
-                    fi
-                fi
-            else
-                anamnesis_queue_payload "/mcp/tools/log_session" "$body"
-                anamnesis_log_error "log_session_queued" "sid=$SID"
-            fi
-        fi
-
-        # ── Usage telemetry ──────────────────────────────────────────────
-        # One POST per NEW assistant turn (typically 1–3 per Stop). Shape
-        # mirrors the Anthropic usage block; server sums and dedups by
-        # turn_id. Fire-and-forget: a lost row is informational only.
-        local usage_records rec usage_body
-        usage_records="$(printf '%s' "$delta_jsonl" | jq -rc '
-            select(.message?.usage?)
-            | {
-                input_tokens:                (.message.usage.input_tokens // 0),
-                output_tokens:               (.message.usage.output_tokens // 0),
-                cache_read_input_tokens:     (.message.usage.cache_read_input_tokens // 0),
-                cache_creation_input_tokens: (.message.usage.cache_creation_input_tokens // 0),
-                model:                       (.message.model // null),
-                turn_id:                     (.message.id // .uuid // null)
-            }' 2>/dev/null)"
-        if [ -n "$usage_records" ]; then
-            while IFS= read -r rec; do
-                [ -z "$rec" ] && continue
-                usage_body="$(printf '%s' "$rec" | jq --arg sid "$SID" \
-                    '. + {session_id: $sid, source: "claude_code_plugin"}')"
-                anamnesis_post "/mcp/tools/track_usage" "$usage_body" >/dev/null 2>&1 || true
-            done <<< "$usage_records"
-        fi
-
-        # Advance the high-water mark. Failed sends were queued above, so
-        # the delta is owned by the queue from here on.
-        printf '{"transcript_path":%s,"lines_sent":%s}\n' \
-            "$(printf '%s' "$TRANSCRIPT_PATH" | jq -Rs 'rtrimstr("\n")' 2>/dev/null || echo '""')" \
-            "$total" > "$state_file" 2>/dev/null || true
-
-        anamnesis_lock_release "$key"
+    local filter body turns usage
+    if [ -z "$TRANSCRIPT_PATH" ] || [ ! -r "$TRANSCRIPT_PATH" ]; then
+        anamnesis_log_error "capture_skipped" "no readable transcript_path in the Stop payload"
         return 0
     fi
+    anamnesis_delta_begin "$TRANSCRIPT_PATH" || return 0
+    filter="$(anamnesis_capture_filter_mode)"
 
-    # Fallback: no transcript file — log whatever stdin gave us.
-    transcript="$(printf '%s' "$STDIN_JSON" | jq -r '
-        .last_assistant_message // .assistant_message // .content // .
-    ' 2>/dev/null)"
-    [ -z "$transcript" ] && return 0
-    body="$(printf '%s' "$transcript" | jq -Rs --arg sid "$SID" \
-        '{session_id: $sid, transcript: .}')"
-    if ! anamnesis_post "/mcp/tools/log_session" "$body" >/dev/null; then
-        anamnesis_queue_payload "/mcp/tools/log_session" "$body"
-        anamnesis_log_error "log_session_queued" "sid=$SID"
+    # One row per line, parsed leniently: a malformed row loses only itself.
+    # Text blocks only; thinking, tool_use and tool_result are dropped.
+    turns="$(printf '%s\n' "$ANAMNESIS_DELTA" | jq -cR --arg filter "$filter" "$ANAMNESIS_JQ_CONVERSATION"'
+        fromjson? | select(is_conversation) | conv_text | select(length > 0)' 2>/dev/null)"
+    if [ -n "$turns" ]; then
+        body="$(printf '%s\n' "$turns" | jq -sc --arg sid "$ANAMNESIS_SID" '{session_id: $sid, transcript: join("\n")}')"
+        if anamnesis_post "/mcp/tools/log_session" "$body" >/dev/null; then
+            if ! anamnesis_receipt_fired "capture"; then
+                jq -n --arg sid "$ANAMNESIS_SID" --argjson t "$(printf '%s\n' "$turns" | wc -l | tr -d '[:space:]')" \
+                    '{session_id: $sid, turns: $t}' > "$PENDING_RECEIPT" 2>/dev/null
+            fi
+        else
+            anamnesis_queue_payload "/mcp/tools/log_session" "$body"
+            anamnesis_log_error "log_session_queued" "sid=$ANAMNESIS_SID"
+        fi
     fi
-    return 0
+
+    # Usage telemetry, informational and fire-and-forget. Claude Code writes
+    # one row per content block, each repeating its message's usage, so send
+    # one record per message id.
+    printf '%s\n' "$ANAMNESIS_DELTA" | jq -cR --arg sid "$ANAMNESIS_SID" -n '
+        [inputs | fromjson? | select(.message?.usage?)
+         | {input_tokens:                (.message.usage.input_tokens // 0),
+            output_tokens:               (.message.usage.output_tokens // 0),
+            cache_read_input_tokens:     (.message.usage.cache_read_input_tokens // 0),
+            cache_creation_input_tokens: (.message.usage.cache_creation_input_tokens // 0),
+            model:                       (.message.model // null),
+            turn_id:                     (.message.id // .uuid // null),
+            session_id: $sid, source: "claude_code_plugin"}]
+        | (map(select(.turn_id == null)) + (map(select(.turn_id != null)) | unique_by(.turn_id)))
+        | .[]' 2>/dev/null \
+    | while IFS= read -r usage; do
+        anamnesis_post "/mcp/tools/track_usage" "$usage" >/dev/null
+    done
+
+    anamnesis_delta_commit
 }
 
-# Detach: fds must not point at the hook's pipes or Claude Code would wait
-# for EOF. The worker survives this script's exit.
+# Detached with no fds on the hook's pipes, or Claude Code would wait for
+# EOF; the worker outlives this script.
 anamnesis_stop_worker </dev/null >/dev/null 2>&1 &
-
 exit 0
