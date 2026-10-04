@@ -106,7 +106,8 @@ sleep 3
 check "overlapping Stops upload once" "$(count_req log_session)" 1
 routes '{}'
 
-# Locks name their real holder and only a dead holder's lock is stolen.
+# Locks name their real holder; only a dead holder's lock is reclaimed, and
+# only under the lock's guard.
 new_home
 (
     . "$HOOKS/common.sh"
@@ -114,15 +115,41 @@ new_home
     { anamnesis_lock_acquire "$L" 0; readlink "$L"; sh -c 'echo "$PPID"'; } > "$WORK/holder" &
     wait
     check "lock names the background worker" "$(sed -n 1p "$WORK/holder")" "$(sed -n 2p "$WORK/holder")"
-    anamnesis_lock_acquire "$L" 0 && check "dead holder's lock is stolen" "$(readlink "$L")" "$ANAMNESIS_SELF_PID"
+    anamnesis_lock_acquire "$L" 0 && check "dead holder's lock is reclaimed" "$(readlink "$L")" "$ANAMNESIS_SELF_PID"
     anamnesis_lock_release "$L"
+    check "release leaves neither lock nor guard" "$(ls "$WORK" | grep -c 'test.lck')" 0
     sleep 30 &
     live=$!
+    true &
+    dead=$!
+    wait "$dead"
     ln -s "$live" "$L"
     anamnesis_lock_acquire "$L" 1 && echo "FAIL live lock was taken"
     anamnesis_lock_release "$L"
     check "live holder keeps its lock" "$(readlink "$L")" "$live"
+    rm -f "$L"
+    ln -s not-a-pid "$L"
+    anamnesis_lock_acquire "$L" 0 && check "a lock no process can hold is reclaimed" "$(readlink "$L")" "$ANAMNESIS_SELF_PID"
+    anamnesis_lock_release "$L"
+    ln -s "$dead" "$L"
+    ln -s "$live" "$L.guard"
+    anamnesis_lock_acquire "$L" 1 && echo "FAIL reclaimed under another process's guard"
+    check "no reclaim while another process holds the guard" "$(readlink "$L")" "$dead"
+    rm -f "$L.guard"
+    anamnesis_lock_acquire "$L" 0 && check "reclaimed once the guard is free" "$(readlink "$L")" "$ANAMNESIS_SELF_PID"
+    anamnesis_lock_release "$L"
+    ln -s "$dead" "$L"
+    ln -s "$dead" "$L.guard"
+    anamnesis_lock_acquire "$L" 0 && check "a dead process's guard does not block" "$(readlink "$L")" "$ANAMNESIS_SELF_PID"
+    anamnesis_lock_release "$L"
     kill "$live"
+    mkdir "$WORK/ro"
+    ln -s "$dead" "$WORK/ro/x.lck"
+    chmod 500 "$WORK/ro"
+    start=$SECONDS
+    anamnesis_lock_acquire "$WORK/ro/x.lck" 1
+    check "an unremovable stale lock gives up within the wait" "$([ $? -eq 1 ] && [ $((SECONDS - start)) -le 6 ] && echo bounded)" bounded
+    chmod 700 "$WORK/ro"
 )
 
 # Queue: atomic writes, unsafe paths dropped, drain stops at a failure.
