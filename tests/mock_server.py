@@ -4,8 +4,10 @@ Usage: mock_server.py <dir>. Listens on a free loopback port, writes it to
 <dir>/port and appends every request as one JSON line to <dir>/requests.
 Responses come from <dir>/routes.json, re-read per request:
 {"/path": {"status": 200, "body": {...}, "delay": 0}}; unknown paths get
-200 {"status": "ok"}. /oauth/token rotates: it accepts only the current
-refresh token (state in <dir>/oauth.json) and issues a new pair.
+200 {"status": "ok"}; a route with "auth": "current" answers 401 unless the
+request carries the current access token. /oauth/token rotates: it accepts
+only the current refresh token (state in <dir>/oauth.json) and issues a new
+pair.
 """
 
 import http.server
@@ -42,12 +44,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._token(raw)
         route = _routes().get(path, {})
         time.sleep(route.get("delay", 0))
+        if route.get("auth") == "current" and self.headers.get("Authorization") != "Bearer " + self._state()["access_token"]:
+            return self._send(401, {"error": "invalid_token"})
         self._send(route.get("status", 200), route.get("body", {"status": "ok"}))
+
+    def _state(self):
+        with open(os.path.join(DIR, "oauth.json")) as f:
+            return json.load(f)
 
     def _token(self, raw):
         state_path = os.path.join(DIR, "oauth.json")
-        with open(state_path) as f:
-            state = json.load(f)
+        state = self._state()
         form = urllib.parse.parse_qs(raw)
         if form.get("refresh_token", [""])[0] != state["refresh_token"]:
             return self._send(400, {"error": "invalid_grant", "error_description": "refresh token revoked"})
