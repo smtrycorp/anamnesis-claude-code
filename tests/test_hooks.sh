@@ -132,6 +132,23 @@ sleep 2
 check "double failure: the next Stop resends the delta" "$(grep log_session "$SRV/requests" | tail -1 | jq -r '.body | fromjson | .transcript')" "user: remember the blue door"
 check "double failure: then the cursor advances" "$(cat "$ANAMNESIS_HOME"/stop_state/*.json | jq -r .lines_sent)" 1
 
+# Turns that end while capture is paused never upload, not even after resume.
+new_home
+transcript
+printf '{"session_id":"s","transcript_path":"%s"}' "$T" | "$HOOKS/stop.sh" >/dev/null
+sleep 1.5
+touch "$ANAMNESIS_HOME/paused"
+echo '{"type":"user","message":{"role":"user","content":"said while paused"},"origin":{"kind":"human"}}' >> "$T"
+printf '{"session_id":"s","transcript_path":"%s"}' "$T" | "$HOOKS/stop.sh" >/dev/null
+sleep 1.5
+rm -f "$ANAMNESIS_HOME/paused"
+echo '{"type":"user","message":{"role":"user","content":"said after resume"},"origin":{"kind":"human"}}' >> "$T"
+printf '{"session_id":"s","transcript_path":"%s"}' "$T" | "$HOOKS/stop.sh" >/dev/null
+sleep 1.5
+check "paused turn skipped, logged as such" "$(grep -c capture_skipped_off "$ANAMNESIS_HOME/hook_errors.log")" 1
+check "paused turn never uploaded" "$(grep -c 'said while paused' "$SRV/requests")" 0
+check "turn after resume uploaded alone" "$(grep log_session "$SRV/requests" | tail -1 | jq -r '.body | fromjson | .transcript')" "user: said after resume"
+
 # Overlapping Stops send a delta once.
 new_home
 routes '{"/mcp/tools/log_session": {"delay": 1}}'

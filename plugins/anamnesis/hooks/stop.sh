@@ -14,16 +14,22 @@ HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source-path=SCRIPTDIR source=capture-filter.sh
 . "$HOOK_DIR/capture-filter.sh"
 
-anamnesis_load_config || exit 0
-
 # Read stdin now: Claude Code closes the pipe when the hook exits.
 STDIN_JSON="$(cat)"
+TRANSCRIPT_PATH="$(printf '%s' "$STDIN_JSON" | jq -r '.transcript_path // empty' 2>/dev/null)"
+if ! anamnesis_capture_enabled; then
+    # Paused or switched off: skip this turn for good, or it would upload
+    # with the first turn after resume.
+    anamnesis_delta_skip "$TRANSCRIPT_PATH" </dev/null >/dev/null 2>&1 &
+    exit 0
+fi
+anamnesis_load_config || exit 0
+
 anamnesis_resolve_sid "$STDIN_JSON"
 if [ -z "$ANAMNESIS_SID" ]; then
     ANAMNESIS_SID="recovered-$(date -u +"%Y%m%dT%H%M%SZ")"
     anamnesis_write_session_id "$ANAMNESIS_SID"
 fi
-TRANSCRIPT_PATH="$(printf '%s' "$STDIN_JSON" | jq -r '.transcript_path // empty' 2>/dev/null)"
 PENDING_RECEIPT="$ANAMNESIS_RECEIPT_DIR/pending_capture.$(anamnesis_transcript_key "$ANAMNESIS_SID").json"
 
 # Foreground, no network: a rejected sign-in seen by an earlier worker, or
