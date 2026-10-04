@@ -1,9 +1,11 @@
 # anamnesis — persistent encrypted memory for Claude Code
 
-Four lifecycle hooks capture every session. A per-user HKDF-derived key
-encrypts content server-side — nobody at smtry.ai can read it without
-your api_key. Browse, search, and delete any memory at
-[anamnesis.smtry.ai/memory](https://anamnesis.smtry.ai/memory).
+Four lifecycle hooks capture every session. Content is encrypted at rest
+under a per-user key with no master key; not yet end-to-end, and
+[anamnesis.smtry.ai/security](https://anamnesis.smtry.ai/security) says
+exactly who can decrypt what. Browse, search, and delete any memory at
+[anamnesis.smtry.ai/memory](https://anamnesis.smtry.ai/memory). What is
+sent, and when, is in [PRIVACY.md](PRIVACY.md).
 
 ## Install
 
@@ -28,20 +30,22 @@ terminal. The access + refresh tokens land in `~/.anamnesis/config.json`
 expiry, so the setup is one-and-done.
 
 Scripted installs (CI, headless servers) can skip the browser with
-`anamnesis-config --api-key anm_... --handle jia`, but the legacy
-`X-Anamnesis-Key` header path is deprecated — it returns 401 after
-**2026-05-20**. Re-run `anamnesis-config` without flags before then.
+`anamnesis-config --api-key - --handle jia < keyfile`, which stores the
+api_key itself and sends it as the `X-Anamnesis-Key` header. Prefer OAuth
+where a browser is available.
 
 ## What the hooks do
 
 | Hook | When | What it does |
 |------|------|--------------|
-| `SessionStart` | Once per session | Issues a fresh `session_id`, drains the pending-upload queue, probes server reachability. |
-| `UserPromptSubmit` | Before every user turn | Retrieves top-5 relevant engrams + a **server-time anchor** (authoritative, from the HTTP `Date:` header), injects them as `additionalContext`. Model starts the turn oriented. |
-| `Stop` | After every assistant turn | Captures the turn via `log_session`. Server dedups by SHA-256 prefix — re-sends are idempotent. |
-| `SessionEnd` | Session close | Calls `session_close`, advancing the server-side pipeline (episodes → echoes). Clears the session marker. |
+| `SessionStart` | Once per session | Adopts Claude Code's `session_id`. In the background, replays the pending-upload queue and probes the server. On resume or compaction, injects this session's server-side cache as reference context. |
+| `UserPromptSubmit` | Before every user turn | Retrieves up to 5 relevant memories and injects them with a `<current-datetime>` anchor (local clock, plus server UTC from the HTTP `Date:` header) as `additionalContext`. Gives up after about 3 seconds so a slow server never holds the prompt. |
+| `Stop` | After every assistant turn | In the background, uploads the conversation added since the last upload via `log_session`, plus per-message usage telemetry (token counts, model) via `track_usage`. |
+| `SessionEnd` | Session close | Calls `session_close`, advancing the server-side pipeline (episodes → echoes). |
 
-All four are POSIX shell scripts that use `curl` + `jq`. No Node, no
+Each hook takes the session id from its own Claude Code payload, so
+parallel sessions never share one. All four are bash scripts that use
+`curl` + `jq`. No Node, no
 compiled binaries. `python3` is only required once, by `anamnesis-config`,
 for the PKCE loopback server during the OAuth consent flow — hooks
 themselves stay shell-only.
@@ -54,9 +58,11 @@ anamnesis pause            suspend capture — hooks become no-ops
 anamnesis resume           re-enable capture
 ```
 
-The `paused` sentinel file at `~/.anamnesis/paused` is the first thing
-every hook checks. Deleting the file resumes immediately. No daemon, no
-restart, no shell refresh needed.
+While `~/.anamnesis/paused` exists, every hook exits without sending
+anything. `ANAMNESIS_CAPTURE=off` (or `0`, `false`, `no`, any case) does the
+same for one process tree, which is how eval and review harnesses keep their
+sessions out of your memory. Neither switch covers the remote MCP server
+Claude Code connects to itself; see [PRIVACY.md](PRIVACY.md).
 
 ## Receipts — proof it's working, at zero token cost
 
@@ -107,9 +113,9 @@ input — because those patterns are correct. What's ours:
    first-class UI at `/memory`. Competitors ship text files on disk or
    developer APIs.
 4. **Time grounding.** Every `UserPromptSubmit` injection carries a
-   `<server-time source="anamnesis">` line read from the server's
-   authoritative HTTP `Date` header — the model always knows what day
-   it is, grounded on the server's clock, not the user's drifted laptop.
+   `<current-datetime>` line with the local clock (day of week, time zone)
+   and, when the server answered, its UTC time from the HTTP `Date`
+   header. It goes out even when retrieval fails.
 5. **Cross-client fidelity.** The same MCP server backs this plugin,
    Claude Desktop, and any MCP-aware client. Install the plugin on
    Claude Code and the connector on Claude Desktop: same api_key, same
@@ -122,25 +128,26 @@ input — because those patterns are correct. What's ours:
 | Path | Contents | Mode |
 |------|----------|------|
 | `~/.anamnesis/config.json` | OAuth: handle, server_url, access_token, refresh_token, expires_at, client_id. Legacy: api_key, handle, server_url. | 0600 |
-| `~/.anamnesis/current_session.json` | session_id for the live session | 0600 |
+| `~/.anamnesis/current_session.json` | last session id, a fallback for hooks whose payload has none | 0600 |
 | `~/.anamnesis/paused` | present ⇒ hooks exit 0 silently | 0600 |
-| `~/.anamnesis/pending_uploads/*.json` | queued payloads from prior failures; drained on next SessionStart | 0600 |
+| `~/.anamnesis/pending_uploads/*.json` | queued payloads from failed uploads; replayed in the background at the next SessionStart | 0600 |
+| `~/.anamnesis/stop_state/` | per-transcript upload progress and locks | 0600 |
 | `~/.anamnesis/receipt_state/` | receipt rate-limit markers + deferred capture-receipt outcome; swept at SessionEnd | 0600 |
-| `~/.anamnesis/hook_errors.log` | structured JSONL of transient errors — for debugging only | 0644 |
+| `~/.anamnesis/auth_failed` | present while the server is rejecting your sign-in | 0600 |
+| `~/.anamnesis/hook_errors.log` | structured JSONL of errors — for debugging only | 0600 |
 
-All state is user-local and user-readable. Nothing in `.claude/settings.json`
-holds your api_key.
+Modes are those the hooks create files with (they run under `umask 077`);
+files left by older versions keep their mode. Nothing in
+`.claude/settings.json` holds your credentials.
 
 ## Failure behavior
 
-Hooks **never block Claude Code.** On any server error they:
-
-1. Print a one-line warning to stderr.
-2. Append a structured entry to `~/.anamnesis/hook_errors.log`.
-3. Queue the failed payload under `~/.anamnesis/pending_uploads/`.
-4. Exit `1` — non-blocking. Claude Code continues the session.
-
-The next `SessionStart` drains the queue before doing anything else.
+Hooks **never block Claude Code** and always exit 0. On a server error
+they append a structured entry to `~/.anamnesis/hook_errors.log` and, for
+an upload, queue the payload under `~/.anamnesis/pending_uploads/`. The
+next `SessionStart` replays the queue in the background, stopping at the
+first failure. When the server rejects your sign-in, Claude Code shows one
+`[anamnesis]` warning line per session until `anamnesis-config` fixes it.
 
 ## Uninstall
 

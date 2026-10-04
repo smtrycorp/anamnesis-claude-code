@@ -1,7 +1,7 @@
 {
   "name": "anamnesis",
-  "version": "0.4.2",
-  "description": "Persistent memory for Claude Code — deterministic capture via lifecycle hooks. 0.4.2 captures only conversation: background-task notices, compaction summaries, subagent hand-backs and usage notices are no longer uploaded as memories (ANAMNESIS_CAPTURE_FILTER=off restores the old behavior). Per-user encrypted, visible, deletable. 0.4.0 adds zero-token receipts (ADR-070): state-triggered '[anamnesis]' status lines — recall + capture proof-of-work — delivered via hook systemMessage only, never injected into model context (0 tokens, CI-asserted), once per session, with a 'receipts' config key (normal|minimal|off). 0.3.3 fixed the date/time anchor: every prompt carries <current-datetime> with day-of-week, local timezone, and server UTC (local clock as offline fallback), unconditionally. 0.3.2 made Stop capture non-blocking and incremental (background worker, per-transcript high-water mark) and fixed ARG_MAX silent upload failures. OAuth 2.1 + PKCE + DCR via 'anamnesis-config'.",
+  "version": "0.4.3",
+  "description": "Persistent memory for Claude Code: lifecycle hooks capture each session's conversation and recall relevant memories into every prompt. Per-user encrypted at rest, visible and deletable at anamnesis.smtry.ai/memory. Sign in with 'anamnesis-config' (OAuth 2.1 + PKCE).",
   "author": {
     "name": "smtry.ai",
     "url": "https://anamnesis.smtry.ai"

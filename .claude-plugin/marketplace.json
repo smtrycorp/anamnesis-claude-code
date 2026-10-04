@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "Smtry's Claude Code marketplace. Currently hosts anamnesis — persistent encrypted memory for Claude Code with deterministic lifecycle-hook capture.",
-    "version": "0.4.2"
+    "version": "0.4.3"
   },
   "plugins": [
     {
       "name": "anamnesis",
       "source": "./plugins/anamnesis",
-      "description": "Persistent, encrypted memory for Claude Code. Deterministic capture via SessionStart/UserPromptSubmit/Stop/SessionEnd hooks. Encrypted at rest with per-user HKDF-derived keys, TLS in transit. (Not yet end-to-end: client-held keys are the roadmap — the security page at anamnesis.smtry.ai/security says exactly who can decrypt what.) 0.4.1 closes the mid-session savings loop: the per-prompt retrieve now sends the session_id that capture already stamps, so same-session recall registers as mid-session savings (was structurally 0 for everyone). 0.4.0 adds zero-token receipts (ADR-070): state-triggered '[anamnesis]' status lines in the terminal — “recalled 4 memories for this prompt”, “session capture is live, /clear is free” — proof the product is working, delivered via hook systemMessage only, never injected into model context (0 tokens, CI-asserted), at most once per session, with a 'receipts' config key (normal|minimal|off). 0.3.7 fixes the capture that stored assistant messages as raw JSON envelopes ([{\"type\":\"text\",\"text\":…}]) instead of prose — the Stop hook now extracts text from content blocks and drops thinking/tool blocks. 0.3.6 adds crash/quit resume: SessionStart adopts Claude Code's own session_id (stable across --resume/--continue/compaction) and, on resume/compact, injects the durable server-side session cache so you pick up where you left off after a crash, quit, or dead battery. 0.3.5 frames injected memories as reference data, never instructions (prompt-injection defense-in-depth). 0.3.4 makes per-prompt memory injection actually fire — every prompt with a topical match now carries an <anamnesis-context> block of memory headlines (a field-name bug had silently disabled injection since 0.3.0). 0.3.3 fixes the date/time anchor (never fired due to a subshell bug — every prompt now carries <current-datetime> with day-of-week, local tz + server UTC). 0.3.2 made capture non-blocking and incremental: Stop runs in a detached background worker and ships only the transcript lines added since the last turn, and large uploads no longer silently die on ARG_MAX. OAuth 2.1 + PKCE end-to-end via 'anamnesis-config'; hooks send Authorization: Bearer with automatic refresh rotation (legacy X-Anamnesis-Key sunset 2026-05-20). Visible, searchable, deletable memory surface at anamnesis.smtry.ai.",
-      "version": "0.4.2",
+      "description": "Persistent, encrypted memory for Claude Code. SessionStart/UserPromptSubmit/Stop/SessionEnd hooks capture each session's conversation and recall relevant memories into every prompt, framed as reference data, never instructions. Encrypted at rest with per-user keys, TLS in transit; not yet end-to-end (anamnesis.smtry.ai/security says exactly who can decrypt what). Sign in once with 'anamnesis-config' (OAuth 2.1 + PKCE); 'anamnesis pause' or ANAMNESIS_CAPTURE=off stops the hooks. Visible, searchable, deletable memory at anamnesis.smtry.ai/memory.",
+      "version": "0.4.3",
       "keywords": [
         "memory",
         "mcp",
