@@ -194,6 +194,34 @@ echo '{"prompt":"q","session_id":"s"}' | PATH="$WORK/shim:$PATH" "$HOOKS/user-pr
 check "request uses the rotated token" "$(grep retrieve_memories "$SRV/requests" | jq -r .auth)" "Bearer at1"
 check "no token on curl's command line" "$(grep -cE 'rt0|rt1|at0|at1|Bearer' "$WORK/argv")" 0
 
+# A sign-in that replaces config.json during a refresh never receives the
+# previous sign-in's new tokens, whether it takes the lock or not.
+new_home '{"expires_at": 0}'
+echo '{"refresh_token": "rt0", "delay": 1}' > "$SRV/oauth.json"
+( . "$HOOKS/common.sh"; anamnesis_load_config && anamnesis_ensure_token ) &
+sleep 0.4
+jq -n --arg url "$URL" '{handle: "b", server_url: $url, access_token: "atB", refresh_token: "rtB", expires_at: 9999999999, client_id: "cB"}' \
+    > "$ANAMNESIS_HOME/config.json"
+wait
+check "a hand-replaced config keeps its own tokens" "$(jq -r '.access_token + " " + .refresh_token + " " + .client_id' "$ANAMNESIS_HOME/config.json")" "atB rtB cB"
+check "the discarded refresh is logged" "$(grep -c refresh_discarded "$ANAMNESIS_HOME/hook_errors.log")" 1
+new_home
+sleep 30 &
+holder=$!
+ln -s "$holder" "$ANAMNESIS_HOME/refresh.lck"
+echo "anm_new" | ANAMNESIS_REFRESH_WAIT=2 plugins/anamnesis/bin/anamnesis-config --api-key - --handle t --server "$URL" >/dev/null 2>"$WORK/cfg.err"
+check "anamnesis-config does not write while a refresh holds the lock" "$? $(jq -r '.access_token' "$ANAMNESIS_HOME/config.json")" "1 at0"
+check "and says why" "$(grep -c 'token refresh is still running' "$WORK/cfg.err")" 1
+kill "$holder"
+
+# A refresh the server refuses skips the request instead of sending a
+# stale token; the time anchor still goes out.
+new_home '{"expires_at": 0}'
+echo '{"refresh_token": "rt9"}' > "$SRV/oauth.json"
+out="$(echo '{"prompt":"q","session_id":"s"}' | "$HOOKS/user-prompt-submit.sh")"
+check "failed refresh: no request with the stale token" "$(count_req retrieve_memories)" 0
+check "failed refresh: time anchor still emitted" "$(jq -r '.hookSpecificOutput.additionalContext' <<<"$out" | grep -c '<current-datetime')" 1
+
 # A rejected sign-in is shown once per session.
 new_home
 routes '{"/mcp/tools/retrieve_memories": {"status": 401}}'
