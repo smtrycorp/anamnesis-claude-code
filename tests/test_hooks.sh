@@ -155,29 +155,66 @@ new_home
     exit $fail
 ) || fail=1
 
-# Queue: atomic writes, unsafe paths dropped, drain stops at a failure.
+# Queue: atomic writes, entries bound to their sign-in, unsafe paths dropped,
+# refusals set aside, the drain stops at a server failure.
 new_home
 (
     . "$HOOKS/common.sh"
     anamnesis_load_config
+    Q="$ANAMNESIS_QUEUE_DIR"
+    bound() { jq -nc --arg url "$URL" --arg p "$1" --argjson b "$2" '{path: $p, body: $b, server_url: $url, credential: "oauth:c"}'; }
     anamnesis_queue_payload "/mcp/tools/log_session" '{"session_id":"a","transcript":"one"}'
-    check "queued file is complete JSON" "$(jq -r '.body.transcript' "$ANAMNESIS_QUEUE_DIR"/*.json)" one
-    check "no temp file left" "$(find "$ANAMNESIS_QUEUE_DIR" -name '.incoming*' | wc -l | tr -d ' ')" 0
-    rm -f "$ANAMNESIS_QUEUE_DIR"/*.json
-    echo '{"path":"@evil.example/x","body":{"a":1}}' > "$ANAMNESIS_QUEUE_DIR/1_0_0.json"
-    echo '{"path":"/mcp/tools/log_session","body":{"n":1}}' > "$ANAMNESIS_QUEUE_DIR/2_0_0.json"
-    echo '{"path":"/mcp/tools/log_session","body":{"n":2}}' > "$ANAMNESIS_QUEUE_DIR/3_0_0.json"
+    check "queued file is complete JSON" "$(jq -r '.body.transcript' "$Q"/*.json)" one
+    check "queued entry names its sign-in" "$(jq -r '.server_url + " " + .credential' "$Q"/*.json)" "$URL oauth:c"
+    check "no temp file left" "$(find "$Q" -name '.incoming*' | wc -l | tr -d ' ')" 0
+    rm -f "$Q"/*.json
+    bound "@evil.example/x" '{"a":1}' > "$Q/1_0_0.json"
+    bound "/mcp/tools/log_session" '{"n":1}' > "$Q/2_0_0.json"
+    bound "/mcp/tools/log_session" '{"n":2}' > "$Q/3_0_0.json"
     routes '{"/mcp/tools/log_session": {"status": 500}}'
     anamnesis_drain_queue
     check "unsafe path dropped, never requested" "$(count_req evil)" 0
     check "dropped payload is logged" "$(grep -c queue_dropped "$ANAMNESIS_HOME/hook_errors.log")" 1
-    check "drain stops at the first failure" "$(count_req log_session)" 1
-    check "failed payloads stay queued" "$(ls "$ANAMNESIS_QUEUE_DIR" | wc -l | tr -d ' ')" 2
+    check "drain stops at the first server failure" "$(count_req log_session)" 1
+    check "failed payloads stay queued" "$(ls "$Q" | wc -l | tr -d ' ')" 2
     routes '{}'
     anamnesis_drain_queue
-    check "drain replays once the server is back" "$(ls "$ANAMNESIS_QUEUE_DIR" | wc -l | tr -d ' ')" 0
+    check "drain replays once the server is back" "$(ls "$Q" | wc -l | tr -d ' ')" 0
+
+    : > "$SRV/requests"
+    bound "/mcp/tools/log_session" '{"n":3}' | jq -c '.credential = "oauth:other"' > "$Q/4_0_0.json"
+    echo '{"path":"/mcp/tools/log_session","body":{"n":4}}' > "$Q/5_0_0.json"
+    bound "/mcp/tools/session_close" '{"session_id":"z"}' > "$Q/6_0_0.json"
+    anamnesis_drain_queue
+    check "another sign-in's entry is never sent" "$(count_req log_session)" 0
+    check "an unbound entry is never sent" "$(count_req '\"n\":4')" 0
+    check "the current sign-in's entry still drains" "$(count_req session_close)" 1
+    check "set aside, not deleted" "$(ls "$Q/quarantine" | wc -l | tr -d ' ')" 2
+    check "quarantine keeps the payload and the reason" "$(jq -r '.body.n, .reason' "$Q/quarantine/4_0_0.json" | tr '\n' ' ')" "3 queued under another sign-in or server "
+    check "quarantine is logged" "$(grep -c queue_quarantined "$ANAMNESIS_HOME/hook_errors.log")" 2
+
+    : > "$SRV/requests"
+    bound "/mcp/tools/log_session" '{"n":5}' > "$Q/7_0_0.json"
+    bound "/mcp/tools/session_close" '{"session_id":"y"}' > "$Q/8_0_0.json"
+    routes '{"/mcp/tools/log_session": {"status": 422}}'
+    anamnesis_drain_queue
+    check "a payload refused for good is set aside" "$(jq -r .reason "$Q/quarantine/7_0_0.json")" "the server refused it (HTTP 422)"
+    check "and the entries after it still drain" "$(count_req session_close)" 1
+    routes '{"/mcp/tools/session_close": {"body": {"status": "error", "message": "reflection failed"}}}'
+    bound "/mcp/tools/session_close" '{"session_id":"x"}' > "$Q/9_0_0.json"
+    anamnesis_drain_queue
+    check "a 2xx that reports an error is a refusal" "$(jq -r .reason "$Q/quarantine/9_0_0.json")" "the server refused it (HTTP 200)"
+    routes '{}'
     exit $fail
 ) || fail=1
+
+# SessionEnd queues a close the server answered 200 {"status":"error"}.
+new_home
+routes '{"/mcp/tools/session_close": {"body": {"status": "error", "message": "reflection failed"}}}'
+echo '{"session_id":"s","reason":"exit"}' | "$HOOKS/session-end.sh"
+check "a failed close is queued for one retry" "$(ls "$ANAMNESIS_HOME/pending_uploads" | wc -l | tr -d ' ')" 1
+check "and logged" "$(grep -c session_close_queued "$ANAMNESIS_HOME/hook_errors.log")" 1
+routes '{}'
 
 # Token refresh: one refresh for concurrent callers, 0600, nothing on argv.
 new_home '{"expires_at": 0}'
@@ -259,6 +296,14 @@ check "config holds the new key" "$(jq -r '.api_key + " " + (.access_token // "n
 check "config written 0600" "$(python3 -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' "$ANAMNESIS_HOME/config.json")" 0o600
 check "api key not on curl's command line" "$(grep -c anm_secret "$WORK/argv")" 0
 check "probe sent the key as a header" "$(grep get_memory_stats "$SRV/requests" | jq -r .auth)" anm_secret
+# A previous sign-in's queue is carried over only on the user's say-so.
+new_home
+jq -nc --arg url "$URL" '{path: "/mcp/tools/log_session", body: {n: 1}, server_url: $url, credential: "oauth:c"}' > "$ANAMNESIS_HOME/pending_uploads/1_0_0.json"
+out="$(echo "anm_secret" | plugins/anamnesis/bin/anamnesis-config --api-key - --handle t --server "$URL")"
+check "without a terminal the old queue is left for quarantine" "$(jq -r .credential "$ANAMNESIS_HOME/pending_uploads/1_0_0.json")" oauth:c
+check "and the user is told how to adopt it" "$(grep -c -- '--adopt-queue' <<<"$out")" 1
+echo "anm_secret" | plugins/anamnesis/bin/anamnesis-config --api-key - --handle t --server "$URL" --adopt-queue >/dev/null
+check "--adopt-queue rebinds it to the new sign-in" "$(jq -r '.credential | .[0:4]' "$ANAMNESIS_HOME/pending_uploads/1_0_0.json")" "key:"
 echo "anm_other" | plugins/anamnesis/bin/anamnesis-config --api-key - --handle t --server "http://127.0.0.1:9" >/dev/null 2>"$WORK/cfg.err"
 check "unreachable server: config not replaced" "$? $(jq -r '.api_key' "$ANAMNESIS_HOME/config.json")" "1 anm_secret"
 check "unreachable server: told so" "$(grep -c 'could not reach' "$WORK/cfg.err")" 1
