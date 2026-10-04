@@ -2,8 +2,10 @@
 # Claude Code Stop: after every assistant turn, upload the conversation
 # added since the last upload (log_session) plus per-turn usage telemetry.
 # All network work runs in a detached worker, so the hook returns at once.
-# A per-transcript high-water mark records how many JSONL lines were sent;
-# resending whole transcripts duplicated episodes on the server.
+# A per-transcript high-water mark records how many JSONL lines were sent
+# (or durably queued); resending whole transcripts duplicated episodes on
+# the server, and moving the mark past turns that were neither sent nor
+# queued lost them.
 
 set -u
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -51,19 +53,19 @@ anamnesis_stop_worker() {
     filter="$(anamnesis_capture_filter_mode)"
 
     # One row per line, parsed leniently: a malformed row loses only itself.
-    # Text blocks only; thinking, tool_use and tool_result are dropped.
+    # Text blocks only, each prefixed with its speaker; thinking, tool_use
+    # and tool_result are dropped.
     turns="$(printf '%s\n' "$ANAMNESIS_DELTA" | jq -cR --arg filter "$filter" "$ANAMNESIS_JQ_CONVERSATION"'
-        fromjson? | select(is_conversation) | conv_text | select(length > 0)' 2>/dev/null)"
+        fromjson? | select(is_conversation) | conv_text as $t | select($t | length > 0) | conv_role + ": " + $t' 2>/dev/null)"
     if [ -n "$turns" ]; then
-        body="$(printf '%s\n' "$turns" | jq -sc --arg sid "$ANAMNESIS_SID" '{session_id: $sid, transcript: join("\n")}')"
-        if anamnesis_post "/mcp/tools/log_session" "$body" >/dev/null; then
-            if ! anamnesis_receipt_fired "capture"; then
-                jq -n --arg sid "$ANAMNESIS_SID" --argjson t "$(printf '%s\n' "$turns" | wc -l | tr -d '[:space:]')" \
-                    '{session_id: $sid, turns: $t}' > "$PENDING_RECEIPT" 2>/dev/null
-            fi
-        else
-            anamnesis_queue_payload "/mcp/tools/log_session" "$body"
-            anamnesis_log_error "log_session_queued" "sid=$ANAMNESIS_SID"
+        # Not a pipe: ANAMNESIS_DELIVERED must survive the call.
+        if ! anamnesis_send_turns "$ANAMNESIS_SID" '{}' <<<"$turns"; then
+            anamnesis_delta_abandon
+            return 0
+        fi
+        if [ "$ANAMNESIS_DELIVERED" -gt 0 ] && ! anamnesis_receipt_fired "capture"; then
+            jq -n --arg sid "$ANAMNESIS_SID" --argjson t "$(printf '%s\n' "$turns" | wc -l | tr -d '[:space:]')" \
+                '{session_id: $sid, turns: $t}' > "$PENDING_RECEIPT" 2>/dev/null
         fi
     fi
 

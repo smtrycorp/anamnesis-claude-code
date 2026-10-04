@@ -21,6 +21,7 @@ ANAMNESIS_JQ_CONVERSATION='
         elif ($c | type) == "string" then $c
         else "" end
     end;
+  def conv_role: if .type == "assistant" then "assistant" else "user" end;
   def envelope($open; $close):
     test("^\\s*<(" + $open + ")>") and test("</(" + $close + ")>\\s*$");
   def is_conversation:

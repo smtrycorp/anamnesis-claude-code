@@ -95,8 +95,42 @@ printf '{"session_id":"mine","transcript_path":"%s"}' "$T" | "$HOOKS/stop.sh" >/
 sleep 1.5
 check "capture carries the payload's session id" \
     "$(grep log_session "$SRV/requests" | jq -r '.body | fromjson | .session_id')" mine
+check "capture keeps the speaker" \
+    "$(grep log_session "$SRV/requests" | jq -r '.body | fromjson | .transcript')" "user: remember the blue door"
 check "Stop without a transcript uploads nothing" \
     "$(: > "$SRV/requests"; echo '{"session_id":"mine","last_assistant_message":"hi"}' | "$HOOKS/stop.sh" >/dev/null; sleep 1; count_req log_session)" 0
+
+# A delta over the server's transcript limit is split into uploads that fit;
+# a single turn over it is cut to it.
+new_home
+T="$WORK/big.$RANDOM.jsonl"
+python3 -c '
+import json, sys
+for n in range(3):
+    print(json.dumps({"type": "user", "message": {"role": "user", "content": "a" * 900000}, "origin": {"kind": "human"}}))
+print(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "b" * 2100000}]}}))
+' > "$T"
+printf '{"session_id":"s","transcript_path":"%s"}' "$T" | "$HOOKS/stop.sh" >/dev/null
+for _ in $(seq 60); do ls "$ANAMNESIS_HOME"/stop_state/*.json >/dev/null 2>&1 && break; sleep 0.5; done
+check "oversized delta split into uploads that fit" "$(grep log_session "$SRV/requests" | jq -r '.body | fromjson | .transcript | length' | tr '\n' ' ')" "1800013 900006 2000000 "
+check "the cut turn is logged" "$(grep -c capture_truncated "$ANAMNESIS_HOME/hook_errors.log")" 1
+check "cursor moved past the delivered delta" "$(jq -r .lines_sent "$ANAMNESIS_HOME"/stop_state/*.json)" 4
+
+# A delta that was neither uploaded nor queued is sent by the next Stop.
+new_home
+transcript
+routes '{"/mcp/tools/log_session": {"status": 500}}'
+chmod 500 "$ANAMNESIS_HOME/pending_uploads"
+printf '{"session_id":"s","transcript_path":"%s"}' "$T" | "$HOOKS/stop.sh" >/dev/null
+sleep 2
+check "double failure: cursor not advanced" "$(cat "$ANAMNESIS_HOME"/stop_state/*.json 2>/dev/null | jq -r .lines_sent)" ""
+check "double failure: deferral logged" "$(grep -c capture_deferred "$ANAMNESIS_HOME/hook_errors.log")" 1
+chmod 700 "$ANAMNESIS_HOME/pending_uploads"
+routes '{}'
+printf '{"session_id":"s","transcript_path":"%s"}' "$T" | "$HOOKS/stop.sh" >/dev/null
+sleep 2
+check "double failure: the next Stop resends the delta" "$(grep log_session "$SRV/requests" | tail -1 | jq -r '.body | fromjson | .transcript')" "user: remember the blue door"
+check "double failure: then the cursor advances" "$(cat "$ANAMNESIS_HOME"/stop_state/*.json | jq -r .lines_sent)" 1
 
 # Overlapping Stops send a delta once.
 new_home
