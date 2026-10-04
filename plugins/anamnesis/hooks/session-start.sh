@@ -46,7 +46,8 @@ if [ -n "$ANAMNESIS_GAP_CTX" ]; then
     CTX="${CTX:+$CTX
 }$ANAMNESIS_GAP_CTX"
 fi
+# On stdin, not as an argument the process list would show.
 if [ -n "$CTX" ]; then
-    jq -n --arg ctx "$CTX" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}'
+    printf '%s' "$CTX" | jq -Rs '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: .}}'
 fi
 exit 0

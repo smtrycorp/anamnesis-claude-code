@@ -84,6 +84,22 @@ ctx="$(echo '{"session_id":"s","source":"resume"}' | "$HOOKS/session-start.sh" |
 check "recovered context closes once" "$(grep -o '</anamnesis-recovered-context>' <<<"$ctx" | wc -l | tr -d ' ')" 1
 routes '{}'
 
+# Recalled memories and recovered context never pass through a command line,
+# and a long prompt is searched by its first 4,000 characters.
+new_home
+mkdir -p "$WORK/jqshim"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/jqargv"\nexec /usr/bin/jq "$@"\n' "$WORK" > "$WORK/jqshim/jq"
+chmod +x "$WORK/jqshim/jq"
+routes '{"/mcp/tools/retrieve_memories": {"body": {"headlines": ["secret-memory-text"]}}, "/session/cache": {"body": {"turns": [{"content": "recovered-secret-text"}]}}}'
+ctx="$(echo '{"prompt":"q","session_id":"s"}' | PATH="$WORK/jqshim:$PATH" "$HOOKS/user-prompt-submit.sh" | jq -r '.hookSpecificOutput.additionalContext')"
+check "recalled memory injected" "$(grep -c secret-memory-text <<<"$ctx")" 1
+ctx="$(echo '{"session_id":"s","source":"resume"}' | PATH="$WORK/jqshim:$PATH" "$HOOKS/session-start.sh" | jq -r '.hookSpecificOutput.additionalContext')"
+check "recovered context injected" "$(grep -c recovered-secret-text <<<"$ctx")" 1
+check "neither appeared on a jq command line" "$(grep -c 'secret-text' "$WORK/jqargv")" 0
+routes '{}'
+python3 -c 'import json; print(json.dumps({"prompt": "p" * 5000, "session_id": "s"}))' | "$HOOKS/user-prompt-submit.sh" >/dev/null
+check "long prompt searched by its first 4000 characters" "$(grep retrieve_memories "$SRV/requests" | tail -1 | jq -r '.body | fromjson | .query | length')" 4000
+
 # Each hook uses the session id from its own payload, not the shared file.
 new_home
 echo '{"session_id":"other"}' > "$ANAMNESIS_HOME/current_session.json"
