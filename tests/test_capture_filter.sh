@@ -2,7 +2,7 @@
 # Capture filter (ADMISSION-1): conversation records in, control records out, by structural fields only.
 set -u
 cd "$(dirname "$0")/.."
-. plugins/anamnesis/hooks/common.sh >/dev/null 2>&1 || true
+. plugins/anamnesis/hooks/capture-filter.sh
 run() { jq -r --arg filter "$1" "$ANAMNESIS_JQ_CONVERSATION"' select(is_conversation) | conv_text | select(length > 0)'; }
 fail=0
 check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: got [$2] want [$3]"; fail=1; fi; }

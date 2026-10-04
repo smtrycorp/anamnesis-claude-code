@@ -9,6 +9,8 @@ set -u
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source-path=SCRIPTDIR source=common.sh
 . "$HOOK_DIR/common.sh"
+# shellcheck source-path=SCRIPTDIR source=capture-filter.sh
+. "$HOOK_DIR/capture-filter.sh"
 
 anamnesis_load_config || exit 0
 
