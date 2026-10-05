@@ -1,6 +1,6 @@
 {
   "name": "anamnesis",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Persistent memory for Claude Code: lifecycle hooks capture each session's conversation and recall relevant memories into every prompt. Per-user encrypted at rest, visible and deletable at anamnesis.smtry.ai/memory. Sign in with 'anamnesis-config' (OAuth 2.1 + PKCE).",
   "author": {
     "name": "smtry.ai",
