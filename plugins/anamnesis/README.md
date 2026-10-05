@@ -10,7 +10,7 @@ sent, and when, is in [PRIVACY.md](PRIVACY.md).
 ## Install
 
 ```
-/plugin marketplace add https://github.com/israelashley/anamnesis-claude-code
+/plugin marketplace add https://github.com/smtrycorp/anamnesis-claude-code
 /plugin install anamnesis@smtry
 ```
 

@@ -5,7 +5,7 @@ Plugins from [smtry.ai](https://anamnesis.smtry.ai) for Claude Code.
 ## Install
 
 ```
-/plugin marketplace add https://github.com/israelashley/anamnesis-claude-code
+/plugin marketplace add https://github.com/smtrycorp/anamnesis-claude-code
 /plugin install anamnesis@smtry
 ```
 
