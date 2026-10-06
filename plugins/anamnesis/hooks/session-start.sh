@@ -25,7 +25,9 @@ anamnesis_gap_notice
 # The budget below is for the recovery fetch in the foreground; the queue
 # replay and probe already forked with the longer background defaults.
 ANAMNESIS_DEADLINE="${ANAMNESIS_SESSION_START_TIMEOUT:-12}"
+ANAMNESIS_RETRY=1
 ANAMNESIS_REFRESH_WAIT=2
+anamnesis_recall_markers_reset
 
 # Nothing to recover on a fresh start, and "clear" asked for a clean slate.
 CTX=""

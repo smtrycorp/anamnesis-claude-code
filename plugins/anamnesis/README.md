@@ -180,7 +180,10 @@ with its cause and shown to you once per cause, a dead refresh token
 included. A reply that is not a recall answer counts as a failure, not as
 an empty result. The recall receipt now appears on every prompt at the
 normal level, with "no matching memories" once per session. Requests
-carry an `X-Anamnesis-Client` header.
+carry an `X-Anamnesis-Client` header. `ANAMNESIS_PROMPT_TIMEOUT` now
+sets the whole recall budget rather than one request's cap, and the
+manifest gives the prompt hook 15 s and session start 20 s before the host
+may stop them.
 
 ## Uninstall
 
