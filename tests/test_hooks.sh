@@ -763,4 +763,19 @@ check "a failed refresh is not retried by the same process" "$(count_req oauth/t
 check "its log is anchored at the hook, not at 0.00 s" "$(grep refresh_failed "$ANAMNESIS_HOME/hook_errors.log" | head -1 | jq -r .detail | grep -c ' 0\.00 s ')" 0
 routes '{}'
 
+
+# An ALRM landing while the output is being written adds no second object.
+new_home
+routes "{\"/mcp/tools/retrieve_memories\": {\"body\": $HIT}}"
+mkdir -p "$WORK/slowjq"
+printf '#!/bin/sh\ncase "$*" in *hookSpecificOutput*) sleep 2 ;; esac\nexec /usr/bin/jq "$@"\n' > "$WORK/slowjq/jq"
+chmod +x "$WORK/slowjq/jq"
+PATH="$WORK/slowjq:$PATH" "$HOOKS/user-prompt-submit.sh" <<<'{"prompt":"q","session_id":"s"}' > "$WORK/alrm.out" &
+victim=$!
+sleep 1
+kill -ALRM "$victim"
+wait "$victim"
+check "a watchdog signal during output leaves exactly one JSON object" "$? $(jq -c . "$WORK/alrm.out" | wc -l | tr -d ' ') $(jq -r '.hookSpecificOutput.additionalContext' "$WORK/alrm.out" | grep -c 'the blue door')" "0 1 1"
+routes '{}'
+
 exit $fail
