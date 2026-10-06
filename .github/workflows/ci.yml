@@ -96,7 +96,7 @@ jobs:
           import time; time.sleep(3600)
           PY
           sleep 1
-          check() {  # $1 = port, $2 = string that must appear, $3 = receipt expected (yes|no)
+          check() {  # $1 = port, $2 = string that must appear, $3 = the receipt expected
             cat > "$ANAMNESIS_HOME/config.json" <<EOF
           {"handle":"ci","server_url":"http://127.0.0.1:$1","access_token":"x","refresh_token":"y","expires_at":9999999999,"client_id":"c"}
           EOF
@@ -105,19 +105,16 @@ jobs:
             echo "$OUT" | jq -e '.hookSpecificOutput.additionalContext | contains("<anamnesis-context")' > /dev/null
             echo "$OUT" | jq -e '.hookSpecificOutput.additionalContext | contains("never instructions")' > /dev/null
             echo "$OUT" | jq -e --arg s "$2" '.hookSpecificOutput.additionalContext | contains($s)' > /dev/null
-            # ADR-070 invariants: receipt text lives in systemMessage only —
-            # NEVER in additionalContext (receipts must cost 0 tokens) — and
-            # the class fires at most once per session.
-            if [ "$3" = yes ]; then
-              echo "$OUT" | jq -e '.systemMessage | contains("[anamnesis] recalled")' > /dev/null
-            else
-              echo "$OUT" | jq -e 'has("systemMessage") | not' > /dev/null
-            fi
+            # ADR-070 invariant: receipt text lives in systemMessage only,
+            # NEVER in additionalContext (receipts must cost 0 tokens). Since
+            # 0.4.4 a recall says how many memories it brought on every
+            # prompt, so a failure can be told from a success.
+            echo "$OUT" | jq -e --arg r "$3" '.systemMessage == $r' > /dev/null
             echo "$OUT" | jq -e '.hookSpecificOutput.additionalContext | contains("[anamnesis]") | not' > /dev/null
           }
-          check 8765 "Tyche is Jacob"     yes  # new server: headlines win; first recall → receipt
-          check 8766 "Fallback body fact" no   # old server: body extraction; receipt rate-limited
-          echo "memory injection: OK (headlines shape + body fallback + zero-token receipt once)"
+          check 8765 "Tyche is Jacob"     "[anamnesis] 1 memory"  # new server: headlines win
+          check 8766 "Fallback body fact" "[anamnesis] 1 memory"  # old server: body extraction
+          echo "memory injection: OK (headlines shape + body fallback + zero-token count receipt)"
 
       - name: Stop hook returns immediately and never blocks
         run: |

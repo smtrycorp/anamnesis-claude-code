@@ -39,7 +39,7 @@ where a browser is available.
 | Hook | When | What it does |
 |------|------|--------------|
 | `SessionStart` | Once per session | Adopts Claude Code's `session_id`. In the background, replays the pending-upload queue and probes the server. On resume or compaction, injects this session's server-side cache as reference context. |
-| `UserPromptSubmit` | Before every user turn | Retrieves up to 5 relevant memories and injects them with a `<current-datetime>` anchor (local clock, plus server UTC from the HTTP `Date:` header) as `additionalContext`. Gives up after about 3 seconds so a slow server never holds the prompt. |
+| `UserPromptSubmit` | Before every user turn | Retrieves up to 5 relevant memories and injects them with a `<current-datetime>` anchor (local clock, plus server UTC from the HTTP `Date:` header) as `additionalContext`. Has 8 seconds in all for the recall, token refresh and one retry included, so a slow server never holds the prompt for long, and a recall that fails says so in a one-line `[anamnesis]` notice. |
 | `Stop` | After every assistant turn | In the background, uploads the conversation added since the last upload via `log_session`, plus per-message usage telemetry (token counts, model) via `track_usage`. |
 | `SessionEnd` | Session close | Calls `session_close`, advancing the server-side pipeline (episodes → echoes). |
 
@@ -66,19 +66,26 @@ Claude Code connects to itself; see [PRIVACY.md](PRIVACY.md).
 
 ## Receipts — proof it's working, at zero token cost
 
-Occasionally the plugin prints a tagged status line in your terminal:
+The plugin prints tagged status lines in your terminal:
 
 ```
-[anamnesis] recalled 4 memories for this prompt — context you didn't have to re-explain
+[anamnesis] 4 memories
+[anamnesis] no matching memories
 [anamnesis] session capture is live — 12 turns backed up so far. /clear is free whenever you want it.
+[anamnesis] recall unavailable this turn (timed out after 8 s)
 ```
 
-Receipts are **state-triggered, never scheduled** — one fires because
-something measurable just happened (a recall served, a capture landed),
-at most once per session per kind. They are delivered through the hook
-`systemMessage` channel, which renders to *you* but is never added to
-the model's context: a receipt costs **0 tokens**, and CI asserts that
-receipt text can never appear in injected context.
+The recall line says how many memories went into the prompt, every
+prompt. "No matching memories" appears once per session, on the first
+recall that found nothing. The capture line fires once per session, when
+the first upload lands. The last line is not a receipt but a notice: a
+recall that failed says why (timed out, server 503, sign in again,
+unexpected reply), on the first failure of that kind in a session and
+again after a recovery, and stays quiet while the same failure repeats.
+All of them are delivered through the hook `systemMessage` channel,
+which renders to *you* but is never added to the model's context: they
+cost **0 tokens**, and CI asserts that receipt text can never appear in
+injected context.
 
 Why they exist: memory infrastructure is invisible precisely when it's
 working. Receipts are the visible heartbeat — and the capture receipt
@@ -90,9 +97,12 @@ Tune them with the `receipts` key in `~/.anamnesis/config.json`:
 
 | Value | Effect |
 |-------|--------|
-| `"normal"` (default) | All receipt kinds. |
-| `"minimal"` | Reserved for high-value receipts only (context-pressure and compaction notices, coming in 0.4.x) — current informational receipts are silenced. |
-| `"off"` | No receipts, ever. Capture and recall behave identically — visibility is a default, never a hostage. |
+| `"normal"` (default) | The recall count on every prompt, "no matching memories" once, the capture receipt once. |
+| `"minimal"` | The recall count once per session, the capture receipt once. |
+| `"off"` | No receipts. Capture and recall behave identically — visibility is a default, never a hostage. |
+
+A failure notice is shown at every level, because a recall that fails
+quietly is the one thing you cannot tell from one that works.
 
 ## What makes this different from claude-mem and mem0
 
@@ -146,8 +156,36 @@ Hooks **never block Claude Code** and always exit 0. On a server error
 they append a structured entry to `~/.anamnesis/hook_errors.log` and, for
 an upload, queue the payload under `~/.anamnesis/pending_uploads/`. The
 next `SessionStart` replays the queue in the background, stopping at the
-first failure. When the server rejects your sign-in, Claude Code shows one
-`[anamnesis]` warning line per session until `anamnesis-config` fixes it.
+first failure. A recall that fails is logged with the stage that failed
+(token refresh, request or response parsing), curl's exit code, the HTTP
+status, the seconds it took and the deadline in force, and never with a
+token, a prompt, a memory or a response body; the notice described under
+Receipts tells you about it. When the server rejects your sign-in, the
+recall notice says to run `anamnesis-config`, and the capture hook shows
+one warning line per session until it is done.
+
+Every request names the client and version that sent it in an
+`X-Anamnesis-Client: claude-code/<version>` header, read from this
+plugin's manifest, so the server can tell which client and version a user
+runs when a recall or capture misbehaves.
+
+## What changed in 0.4.4
+
+Recall used to give up after 3 seconds and say nothing when it failed; a
+quarter of recalls on a busy account took longer than that, so the prompt
+went out without memories and nobody could tell. The recall now has 8
+seconds in all, retries once when the server was down or not reached, and
+honours a `Retry-After` it can fit in the budget. Every failure is logged
+with its cause and shown to you once per cause, a dead refresh token
+included. A reply that is not a recall answer counts as a failure, not as
+an empty result. The recall receipt now appears on every prompt at the
+normal level, with "no matching memories" once per session. Requests
+carry an `X-Anamnesis-Client` header. `ANAMNESIS_PROMPT_TIMEOUT` now
+sets the whole recall budget rather than one request's cap, and the
+manifest gives the prompt hook 15 s and session start 20 s before the host
+may stop them.
+A recall tried a second time carries `attempt: 2` in its request, so the
+server can tell one recall tried twice from two recalls.
 
 ## Uninstall
 

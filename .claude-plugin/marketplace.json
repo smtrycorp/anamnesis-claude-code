@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "Smtry's Claude Code marketplace. Currently hosts anamnesis — persistent encrypted memory for Claude Code with deterministic lifecycle-hook capture.",
-    "version": "0.4.3"
+    "version": "0.4.4"
   },
   "plugins": [
     {
       "name": "anamnesis",
       "source": "./plugins/anamnesis",
       "description": "Persistent, encrypted memory for Claude Code. SessionStart/UserPromptSubmit/Stop/SessionEnd hooks capture each session's conversation and recall relevant memories into every prompt, framed as reference data, never instructions. Encrypted at rest with per-user keys, TLS in transit; not yet end-to-end (anamnesis.smtry.ai/security says exactly who can decrypt what). Sign in once with 'anamnesis-config' (OAuth 2.1 + PKCE); 'anamnesis pause' or ANAMNESIS_CAPTURE=off stops the hooks. Visible, searchable, deletable memory at anamnesis.smtry.ai/memory.",
-      "version": "0.4.3",
+      "version": "0.4.4",
       "keywords": [
         "memory",
         "mcp",

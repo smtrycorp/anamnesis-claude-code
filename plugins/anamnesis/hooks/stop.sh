@@ -40,7 +40,7 @@ elif [ -f "$PENDING_RECEIPT" ]; then
     TURNS="$(jq -r '.turns // 0' < "$PENDING_RECEIPT" 2>/dev/null)"
     rm -f "$PENDING_RECEIPT"
     case "$TURNS" in ''|*[!0-9]*) TURNS=0 ;; esac
-    if [ "$TURNS" -gt 0 ] && [ "$(anamnesis_receipts_level)" = "normal" ] \
+    if [ "$TURNS" -gt 0 ] && [ "$(anamnesis_receipts_level)" != "off" ] \
         && anamnesis_receipt_once "capture"; then
         NOUN="turns"
         [ "$TURNS" -eq 1 ] && NOUN="turn"
