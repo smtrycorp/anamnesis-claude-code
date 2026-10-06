@@ -19,15 +19,17 @@ ANAMNESIS_SID="$(printf '%s' "$STDIN_JSON" | jq -r '.session_id // empty | strin
 anamnesis_write_session_id "$ANAMNESIS_SID"
 SOURCE="$(printf '%s' "$STDIN_JSON" | jq -r '.source // empty' 2>/dev/null)"
 
-anamnesis_start_background_sync
-anamnesis_gap_notice
-
-# The budget below is for the recovery fetch in the foreground; the queue
-# replay and probe already forked with the longer background defaults.
-ANAMNESIS_DEADLINE="${ANAMNESIS_SESSION_START_TIMEOUT:-12}"
+# One elapsed deadline for the foreground work, 3 s inside the 20 s the
+# host gives this hook. The token is refreshed first, so the background sync
+# forked next finds it fresh instead of racing this hook for refresh.lck
+# and leaving the recovery fetch to give up as busy.
+anamnesis_set_deadline "${ANAMNESIS_SESSION_START_TIMEOUT:-12}" 17 ANAMNESIS_SESSION_START_TIMEOUT
 ANAMNESIS_RETRY=1
 ANAMNESIS_REFRESH_WAIT=2
+anamnesis_ensure_token || :
+anamnesis_start_background_sync
 anamnesis_recall_markers_reset
+anamnesis_gap_notice
 
 # Nothing to recover on a fresh start, and "clear" asked for a clean slate.
 CTX=""
