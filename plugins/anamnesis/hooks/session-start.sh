@@ -6,16 +6,17 @@
 
 set -u
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source-path=SCRIPTDIR source=common.sh
-. "$HOOK_DIR/common.sh"
-
-anamnesis_load_config || exit 0
+# shellcheck source-path=SCRIPTDIR source=supervise.sh
+. "$HOOK_DIR/supervise.sh"
 
 STDIN_JSON="$(cat)"
 
 # The foreground work, run by the supervisor so the hook ends by 18 s, 2 s
 # inside the 20 s the host gives it, whatever the work is stuck in.
 session_start_work() {
+    # shellcheck source-path=SCRIPTDIR source=common.sh
+    . "$HOOK_DIR/common.sh"
+    anamnesis_load_config || return 0
     # Older Claude Code versions send no id. The file is the fallback the other
     # hooks read when their own payload carries none.
     ANAMNESIS_SID="$(printf '%s' "$STDIN_JSON" | jq -r '.session_id // empty | strings' 2>/dev/null)"
@@ -68,5 +69,5 @@ session_start_work() {
     fi
 }
 
-anamnesis_supervise SessionStart 18 "" session_start_work
+anamnesis_supervise SessionStart 18 "" "" session_start_work
 exit 0
