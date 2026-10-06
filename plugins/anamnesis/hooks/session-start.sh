@@ -60,7 +60,8 @@ if [ -n "$ANAMNESIS_GAP_CTX" ]; then
 fi
 # On stdin, not as an argument the process list would show.
 if [ -n "$CTX" ]; then
+    OUT="$(printf '%s' "$CTX" | jq -Rs '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: .}}')"
     anamnesis_output_begins
-    printf '%s' "$CTX" | jq -Rs '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: .}}'
+    printf '%s\n' "$OUT"
 fi
 exit 0
