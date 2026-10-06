@@ -184,6 +184,8 @@ carry an `X-Anamnesis-Client` header. `ANAMNESIS_PROMPT_TIMEOUT` now
 sets the whole recall budget rather than one request's cap, and the
 manifest gives the prompt hook 15 s and session start 20 s before the host
 may stop them.
+A recall tried a second time carries `attempt: 2` in its request, so the
+server can tell one recall tried twice from two recalls.
 
 ## Uninstall
 
